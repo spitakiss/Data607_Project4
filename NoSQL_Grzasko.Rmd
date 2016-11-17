@@ -1,0 +1,190 @@
+---
+title: 'Wk 12: NoSQL Database Migration'
+author: "Aaron Grzasko"
+date: "November 17, 2016"
+output: 
+    html_document:
+        theme: simplex
+        highlight: haddock
+---
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+## Assignment and Data Overview  
+  
+The task for this week is to migrate data from a relational database to a NoSQL database.  
+  
+The information I will be migrating was originally part the *nycflights13* data set--see [here](https://cran.r-project.org/web/packages/nycflights13/nycflights13.pdf) for background information.  The csv files and MySQL scripts used to populate the database tables were provided as part of a homework assignment in the CUNY Data Analytics, SQL bridge workshop.  These files can also be retrieved from my [Github repository](https://github.com/spitakiss/Data607_Project4).  
+  
+The NoSQL database that I use in this exercise is Neo4j.  Please note that the assignment solution is not entirely automated within R.  Instead, much of the work is done directly within the Neo4j environment.  For reproducibility purposes, however, I am including the Neo4j scripts within this R Markdown document.  
+  
+## Load Libraries  
+
+```{r}
+if (!require(RMySQL)) install.packages('RMySQL')
+if (!require(getPass)) install.packages('getPass')
+if (!require(RNeo4j)) install.packages('RNeo4j')
+``` 
+  
+  
+## MySQL DB Connection  
+  
+First, let's connect to the `flights_db` and store the tables in R as data frames.  
+  
+```{r}
+# MySQL connection.  Using getPass() function to prompt user for username and password  
+my_db = dbConnect(MySQL(), user=getPass(msg = 'Enter username'), password= getPass('Enter Password'), dbname='flights_db')
+
+# create data frames
+airlines_df <- dbGetQuery(my_db, "SELECT * FROM airlines;")
+airports_df <- dbGetQuery(my_db,"SELECT * FROM airports;")
+flights_df <- dbGetQuery(my_db,"SELECT * FROM flights LIMIT 2000;")  # LIMIT TO 2000 ENTRIES FOR FAST EXECUTION
+planes_df <- dbGetQuery(my_db,"SELECT * FROM planes;")
+weather_df <- dbGetQuery(my_db,"SELECT * FROM weather;")
+
+# db disconnect
+dbDisconnect(my_db)
+
+```
+  
+
+## Export to CSV  
+
+Next, I'll, output the data frames as .csv files.  Note: the csv files should be saved in a folder named "import" within the larger directory where the Neo4j database is saved.  
+  
+```{r}
+# make sure working directory is assigned appropriately--see example directory below
+#setwd("D:/Learn/CUNY/flights_db/import")
+
+# write dfs to csv format in working directory
+write.csv(airlines_df, file = 'airlines.csv',row.names=FALSE)
+write.csv(airports_df, file = 'airports.csv', row.names=FALSE)
+write.csv(flights_df, file = 'flights.csv', row.names=FALSE)
+write.csv(planes_df, file = 'planes.csv', row.names=FALSE)
+write.csv(weather_df, file = 'weather.csv', row.names=FALSE)
+```
+  
+## Migrate tables to Neo4j  
+
+There is an R package, `RNeo4j`, that facilitates the manipulation of Neo4j graph objects within the R environment.  I experimented with this package and was able to establish a connection with my Neo4j database and run queries against existing Neo4j property graphs. However, I was not able to successfully commit the raw csv files from to Neo4j directly from R.  
+  
+To proceed with the assignment, I ran the scripts below directly in the Neo4j environment.  Going forward, I plan to continue working with `RNeo4j` or other packages with the intention of acheiving a more automated solution.  
+  
+**Load Tables in Neo4j**  
+```{r, eval=FALSE}
+
+//Clear Existing nodes and relationship from database
+match (a) optional match (a)-[r]-() delete a,r;
+
+//LOAD airlines table
+LOAD CSV WITH HEADERS FROM "file:///airlines.csv" AS airlines
+CREATE (al: Airline {car_id: airlines.carrier, car_name: airlines.name});
+
+//LOAD airports table
+LOAD CSV WITH HEADERS FROM "file:///airports.csv" AS airports
+CREATE (ap: Airport {ap_id: airports.faa, ap_name: airports.name, lat:airports.lat, lon:airports.lon, alt: airports.alt, tz: airports.tz, dst: airports.dst});  
+
+//LOAD planes table
+LOAD CSV WITH HEADERS FROM "file:///planes.csv" AS planes
+CREATE(p: Plane {tailnum: planes.tailnum, prod_yr: planes.year, p_type: planes.type, mfr: planes.manufacturer, model: planes.model, num_engines: planes.engines, seats: planes.seats, speed:planes.speed, engine_typ: planes.engine}); 
+  
+//LOAD flights table
+LOAD CSV WITH HEADERS FROM "file:///flights.csv" AS flights
+CREATE(f: Flight {year: flights.year, month: flights.month, day: flights.day, dep_time: flights.dep_time, arr_time: flights.arr_time, carrier: flights.carrier, flight_num: flights.flight, air_time: flights.air_time, distance: flights.distance, hour: flights.hour, minute: flights.minute});
+
+//LOAD weather table
+LOAD CSV WITH HEADERS FROM "file:///weather.csv" AS wth
+CREATE(w: Weather {year:wth.year, month: wth.month, day:wth.day, hour:wth.hour, origin:wth.origin, temp:wth.temp, dewp:wth.dewp, humid:wth.humid, wind_dir:wth.wind_dir, wind_speed:wth.wind_speed, wind_gust:wth.wind_gust, precip:wth.precip, pressure: wth.pressure, visib:wth.visib}); 
+
+```
+
+Now, let's create relationship between various tables:  
+
+**Neo4j Relationships**  
+```{r, eval=FALSE}
+//Relate Flight to Airline Carrier
+LOAD CSV WITH HEADERS FROM "file:///flights.csv" AS flights
+MATCH (a:Flight{carrier:flights.carrier})
+MATCH (b:Airline{car_id:flights.carrier})
+MERGE (a)-[r:IS_CARRIER]->(b);
+
+//Relate Flight to plane info
+LOAD CSV WITH HEADERS FROM "file:///flights.csv" AS flights
+MATCH (a:Flight{flight_num:flights.flight, year:flights.year, month:flights.month, day:flights.day, dep_time:flights.dep_time, carrier:flights.carrier})
+MATCH (b:Plane{tailnum:flights.tailnum})
+MERGE (a)-[r:HAS_PLANE_INFO]->(b)
+
+//Relate Flight to arrival airport
+LOAD CSV WITH HEADERS FROM "file:///flights.csv" AS flights
+MATCH (a:Flight{flight_num:flights.flight, year:flights.year, month:flights.month, day:flights.day, dep_time:flights.dep_time, carrier:flights.carrier})
+MATCH (b:Airport{ap_id:flights.dest})
+MERGE (a)-[r:ARRIVES{arr_delay:flights.arr_delay}]->(b)
+
+//Relate Flight to destination
+LOAD CSV WITH HEADERS FROM "file:///flights.csv" AS flights
+MATCH (a:Flight{flight_num:flights.flight, year:flights.year, month:flights.month, day:flights.day, dep_time:flights.dep_time, carrier:flights.carrier})
+MATCH (b:Airport{ap_id:flights.origin})
+MERGE (a)-[r:LEAVES]->(b)
+
+//Relate flight departure to weather conditons
+LOAD CSV WITH HEADERS FROM "file:///flights.csv" AS flights
+MATCH (a:Flight{flight_num:flights.flight, year:flights.year, month:flights.month, day:flights.day, dep_time:flights.dep_time, carrier:flights.carrier})
+MATCH (b: Weather{year: flights.year, month: flights.month, day: flights.day, hour: flights.hour, origin:flights.origin})
+MERGE (a)-[r:HAS_WEATHER]->(b)
+
+
+```
+
+## Example Queries  
+  
+As mentioned in the previous section, I was able to run queries against an established Neo4j database using the `RNeo4j` package.  
+
+In the query below, I use `RNeo4j` to return airplane information for flights that traveled distances in excess of 2,000 miles:  
+
+Please note:  `RNeo4j` is ostensibly only capable of returning data from Cypher queries that are in a tabular format.
+
+```{r}
+# establish connection with Neo4j 
+graph = startGraph("http://localhost:7474/db/data/", username=getPass("Enter username"),getPass("Enter password"))
+
+# cypher code stored as string
+query = 'MATCH(a:Flight)-[r:HAS_PLANE_INFO]->(b:Plane) WHERE toFloat(a.distance) > 2000 RETURN DISTINCT
+            a.distance,b.seats,b.engine_typ ORDER BY a.distance DESC LIMIT 10'
+
+# run query
+cypher(graph, query)
+
+```
+  
+Below is an example of a Cypher query that was run directly in Neo4j.  This query produces a visual representation of the relationships described in the query:  
+  
+`MATCH p=()-[r:IS_CARRIER]->() RETURN p`:  
+
+```{r}
+myurl <-("https://raw.githubusercontent.com/spitakiss/Data607_Project4/master/graph.png")
+download.file(myurl,"C:/Users/Aaron/Downloads/graph.png", mode="wb")
+```
+![Example Query Visual Output](/Users/Aaron/Downloads/graph.png)
+  
+  
+## Pros and Cons of NoSQL Databases
+  
+I will conclude this assignment with some basic observations about the pros and cons of working with a NoSQL database vs a traditional RDBMS.  
+  
+**Pros**  
+  
+* NOSQL queries often execute much faster than those used in relational models, particularly compared to SQL databases with 20+ table joins.  
+* Data summaries and basic manipulations can often  be achieved using significantly less code; so code readability is improved.  
+* NOSQL environments are not restricted to the rigid schema definitions imposed by typical RDMS models.  
+  
+**Cons**  
+  
+* Most software developers are comfortable working with SQL-based databases; however, there are far fewer individuals accustomed to working in NOSQL environments.  This can be a problem for employers with immediate business needs.  
+* The rigidity imposed by RDMS models is often seen as a positive for employers with transactional processes that require near-perfect accuracy.  SQL-based systems are generally perceived as being superior to NOSQL models in this regard.
+
+
+
+
